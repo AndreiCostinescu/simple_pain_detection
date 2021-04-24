@@ -1,7 +1,8 @@
+import cv2 as cv
 import glob
 import numpy as np
+import datetime
 from numpy.linalg import norm
-import cv2 as cv
 from src.common import clock, mosaic
 
 
@@ -45,12 +46,14 @@ class SVM(object):
         self.model.save(fn)
 
 
-class Trainer():
-    def __init__(self, classes, trainPaths):
+class Trainer:
+    def __init__(self, classes, train_paths):
         self.classes = classes
-        self.trainPaths = trainPaths
+        self.train_paths = train_paths
         self.train_data = []
         self.labels = []
+        self.model = None
+        self.method = None
 
     def preprocess_hog(self, imgs):
         samples = []
@@ -93,8 +96,8 @@ class Trainer():
             i = i + 1
         return datas, labels
 
-    def evaluate_model(self, imgs, samples, labels):
-        resp = self.model.predict(samples)
+    def evaluate_model(self, images, samples, labels: np.ndarray):
+        resp = self.model.predict(samples)  # type: np.ndarray
         err = (labels != resp).mean()
         print('error: %.2f %%' % (err * 100))
 
@@ -107,7 +110,7 @@ class Trainer():
         print(confusion)
 
         vis = []
-        for img, flag in zip(imgs, resp == labels):
+        for img, flag in zip(images, resp == labels):
             img = cv.cvtColor(img, cv.COLOR_GRAY2BGR)
             if not flag:
                 img[..., :2] = 0
@@ -117,24 +120,20 @@ class Trainer():
         return mosaic(cols, vis)
 
     def train(self, method):
-        train_data, labels = self.get_data(self.trainPaths)
+        train_data, labels = self.get_data(self.train_paths)
         train_data_array = np.array(train_data)
         labels_array = np.array(labels)
         sample_hogs = self.preprocess_hog(train_data_array)
         self.method = method
+        print("training " + self.method + "...")
         if method == "knn":
-            print('training KNearest...')
             self.model = KNearest(k=20)
-            self.model.train(sample_hogs, labels_array)
-            print('saving ' + str(self.method) + ' as "model_knn.dat"...')
-            self.model.save('model_knn.dat')
         elif method == "svm":
-            print('training SVM...')
             self.model = SVM(C=2.67, gamma=5.383)
-            self.model.train(sample_hogs, labels_array)
-            print('saving ' + str(self.method) + ' as "model_svm.dat"...')
-            self.model.save('model_svm.dat')
-
+        self.model.train(sample_hogs, labels_array)
+        now_time = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+        print('saving ' + str(self.method) + ' as "model_{}_{}.dat"...'.format(self.model, now_time))
+        self.model.save("model_{}_{}.dat".format(self.model, now_time))
         print("end")
 
     def test(self, testPaths):
