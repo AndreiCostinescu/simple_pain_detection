@@ -3,6 +3,7 @@ import cv2 as cv
 import dlib
 import numpy as np
 import pyrealsense2 as rs
+import traceback
 from src.Trainer import SVM, preprocess_single_hog, KNearest
 from typing import Optional, Tuple
 
@@ -34,8 +35,10 @@ class Setup:
         self.fps = 30
 
         self.pain_sender = comm.Communication()
-        self.pain_sender.createSocket(comm.SocketType.UDP, comm.SocketPartner.SocketPartner(("127.0.0.1", 25002), False))
-        self.pain_sender_data = comm.StatusData(8)  # 8 = sizeof(double)
+        # self.pain_sender.createSocket(comm.SocketType.UDP, comm.SocketPartner.SocketPartner(("127.0.0.1", 25002), False))
+        self.pain_sender.createSocket(comm.SocketType.UDP,
+                                      comm.SocketPartner.SocketPartner(("10.151.11.202", 25002), False))
+        self.pain_sender_data = comm.BytesData(8)  # 8 = sizeof(double)
 
     def setup_realsense(self):
         try:
@@ -152,7 +155,7 @@ class Setup:
         return image
 
     def crop_face(self, image: np.ndarray) -> Tuple[bool, Optional[np.ndarray], Optional[Tuple], Optional[Tuple]]:
-        gray = cv.cvtColor(image.copy(), cv.COLOR_BGR2GRAY)
+        gray = cv.cvtColor(image.copy(), cv.COLOR_BGR2GRAY)  # type: np.ndarray
 
         # using dlib
         faces = self.detector(gray)
@@ -162,14 +165,16 @@ class Setup:
         # only select the first person
         face = faces[0]
         landmarks = self.predictor(image=gray, box=face)
+        # print(landmarks.parts())
         x1 = landmarks.part(17).x
         y1 = landmarks.part(19).y
         x2 = landmarks.part(26).x
-        y2 = landmarks.part(6).y
-        if (y2 - y1 <= 0) or (x2 - x1 <= 0):
+        y2 = landmarks.part(7).y
+        if x1 < 0 or y1 < 0 or x2 < 0 or y2 < 0 or (y2 - y1 <= 0) or (x2 - x1 <= 0):
             return False, None, None, None
-
-        return True, gray[y1:y2, x1:x2], (x1, y1), (x2, y2)
+        face = gray[y1:y2, x1:x2]  # type: np.ndarray
+        assert (face.size > 0), "{} // {}: {}, {}, {}, {}".format(face.size, face.shape, x1, y1, x2, y2)
+        return True, face, (x1, y1), (x2, y2)
 
     def is_pain(self, image: np.ndarray, face: np.ndarray, up_left_corner: Tuple,
                 down_right_corner: Tuple) -> Tuple[np.ndarray, bool]:
@@ -192,24 +197,35 @@ class Setup:
             return
         counter = 0
 
+        cv.namedWindow("Captured image")
+        cv.namedWindow("is pain?")
+        # print("Entering try block...")
         try:
             while self.running:
+                # print("running...")
                 image = self.get_image_from_device()
                 if image is None:
                     print("Input device stopped!")
                     break
                 # print(image.shape)
                 cv.imshow("Captured image", image)
+                # print("after cv.imshow")
                 key = cv.waitKey(1)
+                # print("k =", key)
                 if key == ord('q') or key == 27:
                     break
+                # print("Shown image")
 
                 success, cropped_face, up_left_corner, bottom_right_corner = self.crop_face(image)
                 if not success:
                     # print("No face detected in image")
                     continue
+                if cropped_face.size <= 0:
+                    print("Found face with shape:", cropped_face.shape, " and size:", cropped_face.size)
+                    continue
 
-                resized_face = cv.resize(cropped_face.copy(), (48, 48), cv.INTER_AREA)
+                # print("Resize face")
+                resized_face = cv.resize(cropped_face, (48, 48), cv.INTER_AREA)
                 if create_dataset and counter < self.num_ur_images:
                     data_dir = dataset_dir + "/own_data/" + str(counter) + ".png"
                     print("creating your own data ... ")
@@ -222,8 +238,9 @@ class Setup:
                 else:
                     image, pain_flag = self.is_pain(image, resized_face, up_left_corner, bottom_right_corner)
                     cv.imshow("is pain?", image)
-                    self.pain_sender_data.setData(comm.doubleToNetworkBytes(b"", 0, pain_flag), 8)
-                    if not self.pain_sender.sendData(comm.SocketType.UDP, self.pain_sender_data, True):
+                    self.pain_sender_data.setDouble(pain_flag, 0)
+                    if not self.pain_sender.sendRaw(comm.SocketType.UDP, self.pain_sender_data.getBuffer(),
+                                                    self.pain_sender_data.getBufferSize()):
                         print("Error when sending data: " + self.pain_sender.getErrorString())
 
                 key = cv.waitKey(1)
@@ -231,6 +248,9 @@ class Setup:
                     break
         except Exception as e:
             print("Exception occurred: " + str(e))
+            traceback.print_exc()
 
         self.cleanup_device()
-        cv.destroyAllWindows()
+        # cv.destroyAllWindows()
+        cv.destroyWindow("Captured image")
+        cv.destroyWindow("is pain?")
