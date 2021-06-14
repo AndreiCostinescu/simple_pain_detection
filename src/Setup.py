@@ -4,29 +4,33 @@ import dlib
 import numpy as np
 import pyrealsense2 as rs
 import traceback
+from comm import BytesData, Communication, ImageData, MessageType, StatusData, SocketType, SocketPartner, TCPServer
 from src.Trainer import SVM, preprocess_single_hog, KNearest
+from src.simulate_angles import AngleSimulation
 from typing import Optional, Tuple
 
 
 class Setup:
-    def __init__(self, input_device: str, model="svm"):
+    def __init__(self, input_device: str, model="svm", with_angles: bool = False):
         if model == "svm":
             # using SVM model
             self.svm = SVM()
-            self.model_svm = self.svm.load('model_svm.dat')
+            # self.model_svm = self.svm.load('model_svm.dat')
+            self.model_svm = self.svm.load('models/model_svm_2021-04-26-19-18-15.dat')
+            # self.model_svm = self.svm.load('models/model_svm_2021-04-26-21-17-30.dat')
         else:
             self.knn = KNearest()
-            self.model_knn = self.knn.load('model_knn.dat')
+            self.model_knn = self.knn.load('models/model_knn.dat')
 
         # running
         self.running = True
 
         # use dlib face landmark
         self.detector = dlib.get_frontal_face_detector()
-        self.predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
+        self.predictor = dlib.shape_predictor("models/shape_predictor_68_face_landmarks.dat")
 
         # number of your own images
-        self.num_ur_images = 1000
+        self.num_ur_images = 10000
 
         self.input_device = input_device
         self.camera = None
@@ -34,11 +38,13 @@ class Setup:
         self.image_width = 640
         self.fps = 30
 
-        self.pain_sender = comm.Communication()
-        # self.pain_sender.createSocket(comm.SocketType.UDP, comm.SocketPartner.SocketPartner(("127.0.0.1", 25002), False))
-        self.pain_sender.createSocket(comm.SocketType.UDP,
-                                      comm.SocketPartner.SocketPartner(("10.151.11.202", 25002), False))
-        self.pain_sender_data = comm.BytesData(8)  # 8 = sizeof(double)
+        # self.receiver_ip = "10.151.11.202"
+        self.receiver_ip = "10.162.15.70"
+        self.pain_sender = Communication()
+        self.pain_sender.createSocket(SocketType.UDP, SocketPartner.SocketPartner((self.receiver_ip, 25002), False))
+        self.pain_sender_data = BytesData(8)  # 8 = sizeof(double)
+
+        self.angle_sim = AngleSimulation() if with_angles else None
 
     def setup_realsense(self):
         try:
@@ -67,11 +73,11 @@ class Setup:
 
     def setup_network(self):
         print("Initializing network image receiving")
-        server = comm.TCPServer(8400)
+        server = TCPServer(8400)
         while self.running:
             self.camera = server.acceptCommunication()
             if self.camera is not None:
-                print("Created partner: " + self.camera.getPartnerString(comm.SocketType.TCP))
+                print("Created partner: " + self.camera.getPartnerString(SocketType.TCP))
                 break
         server.cleanup()
         if not self.running:
@@ -100,7 +106,7 @@ class Setup:
             assert isinstance(self.camera, cv.VideoCapture)
             self.camera.release()
         elif self.input_device == "network":
-            assert isinstance(self.camera, comm.Communication)
+            assert isinstance(self.camera, Communication)
             self.camera.cleanup()
 
     def get_image_from_device(self) -> Optional[np.ndarray]:
@@ -120,30 +126,29 @@ class Setup:
         elif self.input_device == "video":
             image = None
         elif self.input_device == "network":
-            assert isinstance(self.camera, comm.Communication)
-            i = comm.ImageData()
-            s = comm.StatusData()
+            assert isinstance(self.camera, Communication)
+            i = ImageData()
+            s = StatusData()
             while self.running:
-                success, messageType = self.camera.recvMessageType(comm.SocketType.TCP)
+                success, messageType = self.camera.recvMessageType(SocketType.TCP)
                 if not success:
                     return None
-                if messageType not in [comm.MessageType.IMAGE, comm.MessageType.STATUS]:
+                if messageType not in [MessageType.IMAGE, MessageType.STATUS]:
                     continue
-                if messageType == comm.MessageType.STATUS:
+                if messageType == MessageType.STATUS:
                     data = s
                 else:
                     data = i
-                success, data = self.camera.recvData(comm.SocketType.TCP,
-                                                     data)  # type: bool, (comm.ImageData or comm.StatusData)
+                success, data = self.camera.recvData(SocketType.TCP, data)  # type: bool, (ImageData or StatusData)
                 if not success:
                     return None
-                if messageType == comm.MessageType.STATUS:
-                    assert isinstance(data, comm.StatusData)
+                if messageType == MessageType.STATUS:
+                    assert isinstance(data, StatusData)
                     s = data
                     if comm.strcmp(s.getData(), comm.Messages.QUIT_MESSAGE) == 0:
                         return None
                 else:
-                    assert isinstance(data, comm.ImageData)
+                    assert isinstance(data, ImageData)
                     i = data
                     if not i.isImageDeserialized():
                         return None
@@ -170,6 +175,11 @@ class Setup:
         y1 = landmarks.part(19).y
         x2 = landmarks.part(26).x
         y2 = landmarks.part(7).y
+        points = landmarks.parts()
+        """
+        print(max(0, min([x.x for x in points])), max([x.x for x in points]),
+              max(0, min([x.y for x in points])), max([x.y for x in points]), )
+        # """
         if x1 < 0 or y1 < 0 or x2 < 0 or y2 < 0 or (y2 - y1 <= 0) or (x2 - x1 <= 0):
             return False, None, None, None
         face = gray[y1:y2, x1:x2]  # type: np.ndarray
@@ -185,6 +195,7 @@ class Setup:
         pain = (prediction == 0)  # 0: Pain, 1: Neutral
         text = "Pain" if pain else "Neutral"
         color = (1, 1, 255) if pain else (1, 255, 1)
+        # blue = (255, 1, 1)
 
         image = cv.rectangle(image, up_left_corner, down_right_corner, color, 2)
         cv.putText(image, "%s" % text, (up_left_corner[0], up_left_corner[1] - 10), 0, 5e-3 * 100, color, 2)
@@ -202,6 +213,9 @@ class Setup:
         # print("Entering try block...")
         try:
             while self.running:
+                if self.angle_sim is not None:
+                    self.angle_sim.send(True)
+
                 # print("running...")
                 image = self.get_image_from_device()
                 if image is None:
@@ -212,6 +226,8 @@ class Setup:
                 # print("after cv.imshow")
                 key = cv.waitKey(1)
                 # print("k =", key)
+                if self.angle_sim is not None:
+                    self.angle_sim.process_key(key)
                 if key == ord('q') or key == 27:
                     break
                 # print("Shown image")
@@ -227,9 +243,10 @@ class Setup:
                 # print("Resize face")
                 resized_face = cv.resize(cropped_face, (48, 48), cv.INTER_AREA)
                 if create_dataset and counter < self.num_ur_images:
-                    data_dir = dataset_dir + "/own_data/" + str(counter) + ".png"
-                    print("creating your own data ... ")
-                    cv.imwrite(data_dir, resized_face)
+                    data_dir = dataset_dir + "/" + str(counter) + ".png"
+                    print("creating your own data at " + data_dir + "... ")
+                    if not cv.imwrite(data_dir, resized_face):
+                        raise Exception("Could not write to file...")
                     counter += 1
                 elif create_dataset and counter >= self.num_ur_images:
                     print("recording is finished")
@@ -244,6 +261,8 @@ class Setup:
                         print("Error when sending data: " + self.pain_sender.getErrorString())
 
                 key = cv.waitKey(1)
+                if self.angle_sim is not None:
+                    self.angle_sim.process_key(key)
                 if key == ord('q') or key == 27:
                     break
         except Exception as e:

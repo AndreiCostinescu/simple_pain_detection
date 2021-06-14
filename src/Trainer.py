@@ -132,8 +132,8 @@ class Trainer:
             self.model = SVM(C=2.67, gamma=5.383)
         self.model.train(sample_hogs, labels_array)
         now_time = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-        print('saving ' + str(self.method) + ' as "model_{}_{}.dat"...'.format(self.model, now_time))
-        self.model.save("model_{}_{}.dat".format(self.model, now_time))
+        print('saving ' + str(self.method) + ' as "models/model_{}_{}.dat"...'.format(self.method, now_time))
+        self.model.save("models/model_{}_{}.dat".format(self.method, now_time))
         print("end")
 
     def test(self, testPaths):
