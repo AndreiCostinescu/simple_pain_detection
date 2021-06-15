@@ -7,7 +7,7 @@ import traceback
 from comm import BytesData, Communication, ImageData, MessageType, StatusData, SocketType, SocketPartner, TCPServer
 from src.Trainer import SVM, preprocess_single_hog, KNearest
 from src.simulate_angles import AngleSimulation
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 
 class Setup:
@@ -130,7 +130,7 @@ class Setup:
             i = ImageData()
             s = StatusData()
             while self.running:
-                success, messageType = self.camera.recvMessageType(SocketType.TCP)
+                success, messageType = self.camera.recvMessageType(SocketType.TCP, False)
                 if not success:
                     return None
                 if messageType not in [MessageType.IMAGE, MessageType.STATUS]:
@@ -139,7 +139,7 @@ class Setup:
                     data = s
                 else:
                     data = i
-                success, data = self.camera.recvData(SocketType.TCP, data)  # type: bool, (ImageData or StatusData)
+                success, data = self.camera.recvData(SocketType.TCP, data, False)
                 if not success:
                     return None
                 if messageType == MessageType.STATUS:
@@ -159,35 +159,39 @@ class Setup:
 
         return image
 
-    def crop_face(self, image: np.ndarray) -> Tuple[bool, Optional[np.ndarray], Optional[Tuple], Optional[Tuple]]:
+    def crop_face(self, image: np.ndarray) -> Tuple[
+        bool, Optional[np.ndarray], Optional[Tuple], Optional[Tuple], Optional[List]]:
         gray = cv.cvtColor(image.copy(), cv.COLOR_BGR2GRAY)  # type: np.ndarray
 
         # using dlib
         faces = self.detector(gray)
         if not faces:
-            return False, None, None, None
+            return False, None, None, None, None
 
         # only select the first person
         face = faces[0]
         landmarks = self.predictor(image=gray, box=face)
         # print(landmarks.parts())
+        """
         x1 = landmarks.part(17).x
         y1 = landmarks.part(19).y
         x2 = landmarks.part(26).x
         y2 = landmarks.part(7).y
-        points = landmarks.parts()
         """
-        print(max(0, min([x.x for x in points])), max([x.x for x in points]),
-              max(0, min([x.y for x in points])), max([x.y for x in points]), )
+        points = landmarks.parts()
+        x1 = max(0, min([x.x for x in points]))
+        x2 = max([x.x for x in points])
+        y1 = max(0, min([x.y for x in points]))
+        y2 = max([x.y for x in points])
         # """
         if x1 < 0 or y1 < 0 or x2 < 0 or y2 < 0 or (y2 - y1 <= 0) or (x2 - x1 <= 0):
-            return False, None, None, None
+            return False, None, None, None, []
         face = gray[y1:y2, x1:x2]  # type: np.ndarray
         assert (face.size > 0), "{} // {}: {}, {}, {}, {}".format(face.size, face.shape, x1, y1, x2, y2)
-        return True, face, (x1, y1), (x2, y2)
+        return True, face, (x1, y1), (x2, y2), points
 
     def is_pain(self, image: np.ndarray, face: np.ndarray, up_left_corner: Tuple,
-                down_right_corner: Tuple) -> Tuple[np.ndarray, bool]:
+                down_right_corner: Tuple, face_features: List) -> Tuple[np.ndarray, bool]:
         img_hog = preprocess_single_hog(face)
         sample_array = np.array([img_hog])
         prediction = self.svm.predict(sample_array)[0]
@@ -195,9 +199,11 @@ class Setup:
         pain = (prediction == 0)  # 0: Pain, 1: Neutral
         text = "Pain" if pain else "Neutral"
         color = (1, 1, 255) if pain else (1, 255, 1)
-        # blue = (255, 1, 1)
+        blue = (255, 1, 1)
 
         image = cv.rectangle(image, up_left_corner, down_right_corner, color, 2)
+        for feature in face_features:
+            cv.circle(image, (feature.x, feature.y), 1, blue)
         cv.putText(image, "%s" % text, (up_left_corner[0], up_left_corner[1] - 10), 0, 5e-3 * 100, color, 2)
         return image, pain
 
@@ -232,7 +238,7 @@ class Setup:
                     break
                 # print("Shown image")
 
-                success, cropped_face, up_left_corner, bottom_right_corner = self.crop_face(image)
+                success, cropped_face, up_left_corner, bottom_right_corner, features = self.crop_face(image)
                 if not success:
                     # print("No face detected in image")
                     continue
@@ -253,7 +259,7 @@ class Setup:
                     print("please move your own data to the correct train and test path")
                     break
                 else:
-                    image, pain_flag = self.is_pain(image, resized_face, up_left_corner, bottom_right_corner)
+                    image, pain_flag = self.is_pain(image, resized_face, up_left_corner, bottom_right_corner, features)
                     cv.imshow("is pain?", image)
                     self.pain_sender_data.setDouble(pain_flag, 0)
                     if not self.pain_sender.sendRaw(comm.SocketType.UDP, self.pain_sender_data.getBuffer(),
